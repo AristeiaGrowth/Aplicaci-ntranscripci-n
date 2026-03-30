@@ -194,8 +194,13 @@ def describir_fotograma(client: Anthropic, image_path: str, frame_num: int, tota
                             "type": "text",
                             "text": (
                                 f"Este es el fotograma {frame_num} de {total} de un video. "
-                                "Describe detalladamente lo que ves en esta imagen. "
-                                "Incluye personas, objetos, texto visible, colores, ambiente y acciones. "
+                                "Haz dos cosas:\n\n"
+                                "1. **TEXTO EN PANTALLA**: Lee y transcribe TODO el texto visible en la imagen: "
+                                "titulos, subtitulos, text overlays, captions, watermarks, logos con texto, "
+                                "textos animados, hashtags, nombres de usuario, cualquier texto superpuesto. "
+                                "Transcribelo exactamente como aparece.\n\n"
+                                "2. **DESCRIPCION VISUAL**: Describe detalladamente la escena: "
+                                "personas, objetos, colores, ambiente, acciones y composicion.\n\n"
                                 "Responde en espanol."
                             ),
                         },
