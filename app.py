@@ -242,34 +242,35 @@ def main():
     with st.sidebar:
         st.header("Configuracion")
 
-        # Solo mostrar inputs de API keys si no estan en variables de entorno
-        has_openai_env = bool(os.getenv("OPENAI_API_KEY"))
-        has_anthropic_env = bool(os.getenv("ANTHROPIC_API_KEY"))
+        # API keys: primero revisar env vars, luego session state, luego pedir
+        openai_key = os.getenv("OPENAI_API_KEY", "") or st.session_state.get("openai_key", "")
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "") or st.session_state.get("anthropic_key", "")
 
-        if has_openai_env and has_anthropic_env:
-            st.success("API keys configuradas via variables de entorno")
+        if openai_key and anthropic_key:
+            st.success("API keys configuradas")
         else:
-            if not has_openai_env:
-                openai_key = st.text_input(
-                    "OpenAI API Key",
-                    type="password",
-                    value=st.session_state.get("openai_key", ""),
-                    help="Necesaria para la transcripcion con Whisper",
-                )
-                if openai_key:
-                    st.session_state["openai_key"] = openai_key
-                    os.environ["OPENAI_API_KEY"] = openai_key
+            st.warning("Ingresa tus API keys para continuar")
 
-            if not has_anthropic_env:
-                anthropic_key = st.text_input(
-                    "Anthropic API Key",
-                    type="password",
-                    value=st.session_state.get("anthropic_key", ""),
-                    help="Necesaria para la descripcion visual con Claude",
-                )
-                if anthropic_key:
-                    st.session_state["anthropic_key"] = anthropic_key
-                    os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+        new_openai = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=openai_key,
+            help="Necesaria para la transcripcion con Whisper",
+        )
+        new_anthropic = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            value=anthropic_key,
+            help="Necesaria para la descripcion visual con Claude",
+        )
+
+        # Guardar en session state y env
+        if new_openai:
+            st.session_state["openai_key"] = new_openai
+            os.environ["OPENAI_API_KEY"] = new_openai
+        if new_anthropic:
+            st.session_state["anthropic_key"] = new_anthropic
+            os.environ["ANTHROPIC_API_KEY"] = new_anthropic
 
         num_frames = st.slider("Numero de fotogramas a analizar", 1, 10, 5)
 
