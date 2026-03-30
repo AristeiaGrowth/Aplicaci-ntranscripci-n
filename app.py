@@ -130,7 +130,6 @@ def transcribir_audio(audio_path: str, output_dir: str) -> str:
                 response = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
-                    language="es",
                 )
                 transcripciones.append(response.text)
             except Exception as e:
