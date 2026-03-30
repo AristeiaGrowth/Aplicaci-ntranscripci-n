@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+temp_*/
+*.mp4
+*.mp3
+*.wav
+*.jpg
+*.png
+.streamlit/
