@@ -15,8 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar la aplicacion
 COPY . .
 
-# Puerto que usa Railway
-EXPOSE 8501
-
-# Ejecutar Streamlit
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+# Railway asigna el puerto via $PORT
+CMD streamlit run app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true
