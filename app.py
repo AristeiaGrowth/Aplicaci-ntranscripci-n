@@ -241,24 +241,37 @@ def main():
     # Sidebar para configuracion
     with st.sidebar:
         st.header("Configuracion")
-        openai_key = st.text_input(
-            "OpenAI API Key",
-            type="password",
-            value=os.getenv("OPENAI_API_KEY", ""),
-            help="Necesaria para la transcripcion con Whisper",
-        )
-        anthropic_key = st.text_input(
-            "Anthropic API Key",
-            type="password",
-            value=os.getenv("ANTHROPIC_API_KEY", ""),
-            help="Necesaria para la descripcion visual con Claude",
-        )
-        num_frames = st.slider("Numero de fotogramas a analizar", 1, 10, 5)
 
-        if openai_key:
-            os.environ["OPENAI_API_KEY"] = openai_key
-        if anthropic_key:
-            os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+        # Solo mostrar inputs de API keys si no estan en variables de entorno
+        has_openai_env = bool(os.getenv("OPENAI_API_KEY"))
+        has_anthropic_env = bool(os.getenv("ANTHROPIC_API_KEY"))
+
+        if has_openai_env and has_anthropic_env:
+            st.success("API keys configuradas via variables de entorno")
+        else:
+            if not has_openai_env:
+                openai_key = st.text_input(
+                    "OpenAI API Key",
+                    type="password",
+                    value=st.session_state.get("openai_key", ""),
+                    help="Necesaria para la transcripcion con Whisper",
+                )
+                if openai_key:
+                    st.session_state["openai_key"] = openai_key
+                    os.environ["OPENAI_API_KEY"] = openai_key
+
+            if not has_anthropic_env:
+                anthropic_key = st.text_input(
+                    "Anthropic API Key",
+                    type="password",
+                    value=st.session_state.get("anthropic_key", ""),
+                    help="Necesaria para la descripcion visual con Claude",
+                )
+                if anthropic_key:
+                    st.session_state["anthropic_key"] = anthropic_key
+                    os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+
+        num_frames = st.slider("Numero de fotogramas a analizar", 1, 10, 5)
 
         st.divider()
         st.markdown(
@@ -303,7 +316,6 @@ def main():
                 st.session_state["transcripcion"] = transcripcion
                 st.text_area("Texto transcrito", transcripcion, height=400)
 
-                # Boton para copiar
                 st.download_button(
                     "Descargar transcripcion",
                     transcripcion,
@@ -318,16 +330,53 @@ def main():
                 with st.spinner("Analizando fotogramas con Claude..."):
                     descripciones = describir_todos_fotogramas(frames)
 
-                st.session_state["descripciones"] = descripciones
+                # Guardar descripciones como texto (las imagenes son temporales)
+                descripciones_texto = [
+                    {"description": d["description"]} for d in descripciones
+                ]
+                st.session_state["descripciones"] = descripciones_texto
 
                 for desc in descripciones:
                     st.image(desc["path"], width=350)
                     st.markdown(desc["description"])
                     st.divider()
 
-                # Descargar descripciones
                 texto_desc = "\n\n---\n\n".join(
                     [f"Fotograma {i+1}:\n{d['description']}" for i, d in enumerate(descripciones)]
+                )
+                st.download_button(
+                    "Descargar descripciones",
+                    texto_desc,
+                    file_name="descripciones.txt",
+                    mime="text/plain",
+                )
+
+    # Mostrar resultados previos si existen (al recargar la pagina)
+    elif "transcripcion" in st.session_state or "descripciones" in st.session_state:
+        st.info("Resultados de la ultima sesion:")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if "transcripcion" in st.session_state:
+                st.subheader("Transcripcion")
+                st.text_area("Texto transcrito", st.session_state["transcripcion"], height=400)
+                st.download_button(
+                    "Descargar transcripcion",
+                    st.session_state["transcripcion"],
+                    file_name="transcripcion.txt",
+                    mime="text/plain",
+                )
+
+        with col2:
+            if "descripciones" in st.session_state:
+                st.subheader("Descripcion Visual")
+                for i, desc in enumerate(st.session_state["descripciones"]):
+                    st.markdown(f"**Fotograma {i+1}:**")
+                    st.markdown(desc["description"])
+                    st.divider()
+
+                texto_desc = "\n\n---\n\n".join(
+                    [f"Fotograma {i+1}:\n{d['description']}" for i, d in enumerate(st.session_state["descripciones"])]
                 )
                 st.download_button(
                     "Descargar descripciones",
