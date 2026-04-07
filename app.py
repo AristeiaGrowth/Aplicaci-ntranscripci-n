@@ -5,8 +5,10 @@ import os
 import base64
 import shutil
 import time
+import re
 from pathlib import Path
 
+import gdown
 from openai import OpenAI
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -36,6 +38,49 @@ def verificar_dependencias():
 
 
 # --- Funciones principales ---
+
+
+def extraer_id_google_drive(url: str) -> str | None:
+    """Extrae el file ID de un link de Google Drive."""
+    patterns = [
+        r'/file/d/([a-zA-Z0-9_-]+)',       # /file/d/ID/view
+        r'id=([a-zA-Z0-9_-]+)',             # ?id=ID
+        r'/open\?id=([a-zA-Z0-9_-]+)',      # /open?id=ID
+        r'drive\.google\.com/uc\?.*id=([a-zA-Z0-9_-]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def descargar_google_drive(url: str, output_dir: str) -> str:
+    """Descarga un archivo desde Google Drive."""
+    file_id = extraer_id_google_drive(url)
+    if not file_id:
+        st.error("No se pudo extraer el ID del archivo de Google Drive. Verifica el link.")
+        st.stop()
+
+    output_path = os.path.join(output_dir, "drive_file")
+    try:
+        download_url = f"https://drive.google.com/uc?id={file_id}"
+        result = gdown.download(download_url, output_path, quiet=False, fuzzy=True)
+        if result is None:
+            st.error(
+                "No se pudo descargar el archivo. Verifica que:\n"
+                "1. El link sea correcto\n"
+                "2. El archivo tenga permisos de **'Cualquier persona con el link'**\n"
+                "3. No sea un archivo demasiado grande para descarga directa"
+            )
+            st.stop()
+        # gdown puede cambiar el nombre del archivo
+        if result != output_path and os.path.exists(result):
+            return result
+        return output_path
+    except Exception as e:
+        st.error(f"Error al descargar desde Google Drive: {e}")
+        st.stop()
 
 
 def descargar_video(url: str, output_dir: str) -> str:
@@ -455,12 +500,20 @@ def main():
             "- FFmpeg (procesamiento)"
         )
 
-    # Input principal - Tabs para URL o archivo local
-    tab_url, tab_archivo = st.tabs(["Desde URL", "Subir archivo"])
+    # Input principal - Tabs para URL, Google Drive, o archivo local
+    tab_url, tab_drive, tab_archivo = st.tabs(["Desde URL", "Google Drive", "Subir archivo"])
 
     with tab_url:
         url = st.text_input("URL del video (YouTube, Vimeo, Twitter, TikTok, etc.)")
         procesar_url = st.button("Procesar URL", type="primary", use_container_width=True)
+
+    with tab_drive:
+        drive_url = st.text_input(
+            "Link de Google Drive",
+            placeholder="https://drive.google.com/file/d/.../view",
+        )
+        st.caption("El archivo debe tener permisos de **'Cualquier persona con el link'**")
+        procesar_drive = st.button("Descargar y procesar", type="primary", use_container_width=True)
 
     with tab_archivo:
         archivo = st.file_uploader(
@@ -479,6 +532,11 @@ def main():
         fuente = "url"
     elif procesar_url and not url:
         st.warning("Por favor ingresa una URL.")
+    elif procesar_drive and drive_url:
+        debe_procesar = True
+        fuente = "drive"
+    elif procesar_drive and not drive_url:
+        st.warning("Por favor pega un link de Google Drive.")
     elif procesar_archivo and archivo:
         debe_procesar = True
         fuente = "archivo"
@@ -499,6 +557,16 @@ def main():
                     duracion = obtener_duracion_video(video_path)
                     status.update(
                         label=f"Video descargado ({duracion:.0f} segundos)",
+                        state="complete",
+                    )
+            elif fuente == "drive":
+                with st.status("Descargando desde Google Drive...", expanded=True) as status:
+                    video_path = descargar_google_drive(drive_url, tmpdir)
+                    solo_audio = es_archivo_audio(video_path)
+                    duracion = obtener_duracion_video(video_path)
+                    tipo = "Audio" if solo_audio else "Video"
+                    status.update(
+                        label=f"{tipo} descargado desde Drive ({duracion:.0f} segundos)",
                         state="complete",
                     )
             else:
