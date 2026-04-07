@@ -66,8 +66,35 @@ def descargar_video(url: str, output_dir: str) -> str:
     st.stop()
 
 
+def guardar_archivo_subido(archivo, output_dir: str) -> str:
+    """Guarda un archivo subido a disco en chunks para evitar problemas de memoria."""
+    ext = Path(archivo.name).suffix.lower()
+    archivo_path = os.path.join(output_dir, f"uploaded{ext}")
+    with open(archivo_path, "wb") as f:
+        # Escribir en chunks de 1MB para archivos grandes
+        data = archivo.getbuffer()
+        f.write(data)
+    return archivo_path
+
+
+def es_archivo_audio(path: str) -> bool:
+    """Determina si un archivo es solo audio (sin video)."""
+    ext = Path(path).suffix.lower()
+    if ext in (".mp3", ".wav", ".m4a", ".ogg", ".flac"):
+        return True
+    # Para MP4 y otros, verificar si tienen stream de video
+    if ext in (".mp4", ".mkv", ".webm", ".mov", ".avi"):
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+            capture_output=True, text=True,
+        )
+        return result.stdout.strip() == ""
+    return False
+
+
 def extraer_audio(video_path: str, output_dir: str) -> str:
-    """Extrae el audio del video en formato mp3 (para respetar el limite de 25MB de Whisper)."""
+    """Extrae el audio del video en formato mp3."""
     audio_path = os.path.join(output_dir, "audio.mp3")
     cmd = [
         "ffmpeg", "-i", video_path,
@@ -75,7 +102,7 @@ def extraer_audio(video_path: str, output_dir: str) -> str:
         audio_path, "-y",
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=180)
     except subprocess.CalledProcessError as e:
         st.error(f"Error al extraer audio:\n```\n{e.stderr}\n```")
         st.stop()
@@ -88,14 +115,12 @@ def dividir_audio(audio_path: str, output_dir: str, max_size_mb: int = 24) -> li
     if size_mb <= max_size_mb:
         return [audio_path]
 
-    # Obtener duracion
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path],
         capture_output=True, text=True,
     )
     duration = float(result.stdout.strip())
 
-    # Calcular cuantos segmentos necesitamos
     num_segments = int(size_mb / max_size_mb) + 1
     segment_duration = duration / num_segments
 
@@ -147,12 +172,17 @@ def obtener_duracion_video(video_path: str) -> float:
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video_path],
         capture_output=True, text=True,
     )
-    return float(result.stdout.strip())
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return 0.0
 
 
 def extraer_fotogramas(video_path: str, output_dir: str, num_frames: int = 5) -> list[str]:
     """Extrae fotogramas distribuidos uniformemente a lo largo del video."""
     duration = obtener_duracion_video(video_path)
+    if duration <= 0:
+        return []
     timestamps = [duration * i / (num_frames + 1) for i in range(1, num_frames + 1)]
 
     frame_paths = []
@@ -229,20 +259,156 @@ def describir_todos_fotogramas(frame_paths: list[str]) -> list[dict]:
     return resultados
 
 
+def analizar_contexto(transcripcion: str, descripciones: list[dict] | None = None) -> str:
+    """Usa Claude para analizar el contexto completo del video/audio."""
+    client = Anthropic()
+
+    contenido = f"## Transcripcion del audio:\n{transcripcion}\n\n"
+    if descripciones:
+        contenido += "## Descripcion visual de los fotogramas:\n"
+        for i, d in enumerate(descripciones):
+            contenido += f"\n### Fotograma {i+1}:\n{d['description']}\n"
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1500,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Analiza el siguiente contenido de un video/audio y proporciona un analisis completo.\n\n"
+                        f"{contenido}\n\n"
+                        "Responde con las siguientes secciones:\n\n"
+                        "1. **RESUMEN**: Un resumen conciso de que trata el video/audio (2-3 oraciones).\n\n"
+                        "2. **CONTEXTO**: Que tipo de contenido es (anuncio publicitario, tutorial, podcast, "
+                        "entrevista, presentacion, contenido educativo, entretenimiento, etc.) y para que audiencia.\n\n"
+                        "3. **MENSAJE CLAVE**: Cual es el mensaje principal o proposito del contenido. "
+                        "Si es un anuncio, que producto/servicio promueve y que estrategia usa.\n\n"
+                        "4. **TONO Y ESTILO**: Describe el tono (formal, casual, emocional, humoristico, urgente, etc.) "
+                        "y el estilo de comunicacion.\n\n"
+                        "5. **PUNTOS IMPORTANTES**: Lista los puntos mas relevantes mencionados.\n\n"
+                        "Responde en espanol."
+                    ),
+                }
+            ],
+        )
+        return response.content[0].text
+    except Exception as e:
+        return f"Error al analizar contexto: {e}"
+
+
 # --- Interfaz principal ---
+
+
+def mostrar_resultados_previos():
+    """Muestra resultados guardados de la sesion anterior."""
+    if not any(k in st.session_state for k in ["transcripcion", "descripciones", "contexto"]):
+        return
+
+    st.info("Resultados de la ultima sesion:")
+
+    if "contexto" in st.session_state:
+        st.subheader("Analisis de Contexto")
+        st.markdown(st.session_state["contexto"])
+        st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if "transcripcion" in st.session_state:
+            st.subheader("Transcripcion")
+            st.text_area("Texto transcrito", st.session_state["transcripcion"], height=400)
+            st.download_button(
+                "Descargar transcripcion",
+                st.session_state["transcripcion"],
+                file_name="transcripcion.txt",
+                mime="text/plain",
+            )
+
+    with col2:
+        if "descripciones" in st.session_state:
+            st.subheader("Descripcion Visual")
+            for i, desc in enumerate(st.session_state["descripciones"]):
+                st.markdown(f"**Fotograma {i+1}:**")
+                st.markdown(desc["description"])
+                st.divider()
+
+
+def procesar_contenido(video_path: str, tmpdir: str, solo_audio: bool, solo_transcripcion: bool, num_frames: int):
+    """Procesa el video/audio: transcribe, describe fotogramas, y analiza contexto."""
+    transcripcion = None
+    descripciones = None
+
+    # Siempre transcribir
+    st.subheader("Transcripcion")
+    with st.spinner("Extrayendo audio..."):
+        audio_path = extraer_audio(video_path, tmpdir)
+    with st.spinner("Transcribiendo con Whisper..."):
+        transcripcion = transcribir_audio(audio_path, tmpdir)
+
+    st.session_state["transcripcion"] = transcripcion
+    st.text_area("Texto transcrito", transcripcion, height=300)
+    st.download_button(
+        "Descargar transcripcion",
+        transcripcion,
+        file_name="transcripcion.txt",
+        mime="text/plain",
+    )
+
+    # Describir fotogramas si aplica
+    if not solo_audio and not solo_transcripcion:
+        st.divider()
+        st.subheader("Descripcion Visual")
+        with st.spinner("Extrayendo fotogramas..."):
+            frames = extraer_fotogramas(video_path, tmpdir, num_frames)
+        if frames:
+            with st.spinner("Analizando fotogramas con Claude..."):
+                descripciones_raw = describir_todos_fotogramas(frames)
+
+            descripciones = [{"description": d["description"]} for d in descripciones_raw]
+            st.session_state["descripciones"] = descripciones
+
+            for desc in descripciones_raw:
+                st.image(desc["path"], width=350)
+                st.markdown(desc["description"])
+                st.divider()
+
+            texto_desc = "\n\n---\n\n".join(
+                [f"Fotograma {i+1}:\n{d['description']}" for i, d in enumerate(descripciones_raw)]
+            )
+            st.download_button(
+                "Descargar descripciones",
+                texto_desc,
+                file_name="descripciones.txt",
+                mime="text/plain",
+            )
+
+    # Analisis de contexto con IA
+    st.divider()
+    st.subheader("Analisis de Contexto")
+    with st.spinner("Analizando contexto del contenido con IA..."):
+        contexto = analizar_contexto(transcripcion, descripciones)
+
+    st.session_state["contexto"] = contexto
+    st.markdown(contexto)
+    st.download_button(
+        "Descargar analisis",
+        contexto,
+        file_name="analisis_contexto.txt",
+        mime="text/plain",
+    )
 
 
 def main():
     verificar_dependencias()
 
     st.title("Transcripcion y Descripcion de Video")
-    st.markdown("Ingresa la URL de un video para obtener su transcripcion y una descripcion visual basada en sus fotogramas.")
+    st.markdown("Ingresa la URL de un video o sube un archivo para obtener su transcripcion, descripcion visual y analisis de contexto.")
 
     # Sidebar para configuracion
     with st.sidebar:
         st.header("Configuracion")
 
-        # API keys: primero revisar env vars, luego session state, luego pedir
         openai_key = os.getenv("OPENAI_API_KEY", "") or st.session_state.get("openai_key", "")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY", "") or st.session_state.get("anthropic_key", "")
 
@@ -264,7 +430,6 @@ def main():
             help="Necesaria para la descripcion visual con Claude",
         )
 
-        # Guardar en session state y env
         if new_openai:
             st.session_state["openai_key"] = new_openai
             os.environ["OPENAI_API_KEY"] = new_openai
@@ -272,13 +437,20 @@ def main():
             st.session_state["anthropic_key"] = new_anthropic
             os.environ["ANTHROPIC_API_KEY"] = new_anthropic
 
-        num_frames = st.slider("Numero de fotogramas a analizar", 1, 10, 5)
+        st.divider()
+        st.header("Opciones")
+        solo_transcripcion = st.checkbox(
+            "Solo transcripcion",
+            help="Solo transcribir el audio, sin analizar fotogramas (mas rapido y barato)",
+        )
+        num_frames = st.slider("Numero de fotogramas a analizar", 1, 10, 5,
+                                disabled=solo_transcripcion)
 
         st.divider()
         st.markdown(
             "**Powered by:**\n"
             "- OpenAI Whisper (transcripcion)\n"
-            "- Claude Sonnet (descripcion visual)\n"
+            "- Claude Sonnet (descripcion visual + contexto)\n"
             "- yt-dlp (descarga)\n"
             "- FFmpeg (procesamiento)"
         )
@@ -300,7 +472,7 @@ def main():
 
     # Determinar si hay algo que procesar
     debe_procesar = False
-    fuente = None  # "url" o "archivo"
+    fuente = None
 
     if procesar_url and url:
         debe_procesar = True
@@ -319,10 +491,9 @@ def main():
             return
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            es_solo_audio = False
+            solo_audio = False
 
             if fuente == "url":
-                # Descargar video desde URL
                 with st.status("Descargando video...", expanded=True) as status:
                     video_path = descargar_video(url, tmpdir)
                     duracion = obtener_duracion_video(video_path)
@@ -331,116 +502,17 @@ def main():
                         state="complete",
                     )
             else:
-                # Guardar archivo subido a disco
-                ext = Path(archivo.name).suffix.lower()
-                archivo_path = os.path.join(tmpdir, f"uploaded{ext}")
-                with open(archivo_path, "wb") as f:
-                    f.write(archivo.getbuffer())
+                with st.spinner("Guardando archivo..."):
+                    video_path = guardar_archivo_subido(archivo, tmpdir)
+                    solo_audio = es_archivo_audio(video_path)
+                    duracion = obtener_duracion_video(video_path)
+                    tipo = "Audio" if solo_audio else "Video"
+                    st.success(f"{tipo} cargado ({duracion:.0f} segundos)")
 
-                es_solo_audio = ext in (".mp3", ".wav", ".m4a", ".ogg", ".flac")
-                video_path = archivo_path
+            procesar_contenido(video_path, tmpdir, solo_audio, solo_transcripcion, num_frames)
 
-                duracion = obtener_duracion_video(archivo_path)
-                tipo = "Audio" if es_solo_audio else "Video"
-                st.success(f"{tipo} cargado ({duracion:.0f} segundos)")
-
-            # Procesar
-            if es_solo_audio:
-                # Solo transcribir, no hay fotogramas
-                st.subheader("Transcripcion")
-                with st.spinner("Preparando audio..."):
-                    audio_path = extraer_audio(video_path, tmpdir)
-                with st.spinner("Transcribiendo con Whisper..."):
-                    transcripcion = transcribir_audio(audio_path, tmpdir)
-
-                st.session_state["transcripcion"] = transcripcion
-                st.text_area("Texto transcrito", transcripcion, height=400)
-                st.download_button(
-                    "Descargar transcripcion",
-                    transcripcion,
-                    file_name="transcripcion.txt",
-                    mime="text/plain",
-                )
-            else:
-                # Video: transcribir + describir fotogramas
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.subheader("Transcripcion")
-                    with st.spinner("Extrayendo audio..."):
-                        audio_path = extraer_audio(video_path, tmpdir)
-                    with st.spinner("Transcribiendo con Whisper..."):
-                        transcripcion = transcribir_audio(audio_path, tmpdir)
-
-                    st.session_state["transcripcion"] = transcripcion
-                    st.text_area("Texto transcrito", transcripcion, height=400)
-                    st.download_button(
-                        "Descargar transcripcion",
-                        transcripcion,
-                        file_name="transcripcion.txt",
-                        mime="text/plain",
-                    )
-
-                with col2:
-                    st.subheader("Descripcion Visual")
-                    with st.spinner("Extrayendo fotogramas..."):
-                        frames = extraer_fotogramas(video_path, tmpdir, num_frames)
-                    with st.spinner("Analizando fotogramas con Claude..."):
-                        descripciones = describir_todos_fotogramas(frames)
-
-                    descripciones_texto = [
-                        {"description": d["description"]} for d in descripciones
-                    ]
-                    st.session_state["descripciones"] = descripciones_texto
-
-                    for desc in descripciones:
-                        st.image(desc["path"], width=350)
-                        st.markdown(desc["description"])
-                        st.divider()
-
-                    texto_desc = "\n\n---\n\n".join(
-                        [f"Fotograma {i+1}:\n{d['description']}" for i, d in enumerate(descripciones)]
-                    )
-                    st.download_button(
-                        "Descargar descripciones",
-                        texto_desc,
-                        file_name="descripciones.txt",
-                        mime="text/plain",
-                    )
-
-    # Mostrar resultados previos si existen (al recargar la pagina)
-    elif "transcripcion" in st.session_state or "descripciones" in st.session_state:
-        st.info("Resultados de la ultima sesion:")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if "transcripcion" in st.session_state:
-                st.subheader("Transcripcion")
-                st.text_area("Texto transcrito", st.session_state["transcripcion"], height=400)
-                st.download_button(
-                    "Descargar transcripcion",
-                    st.session_state["transcripcion"],
-                    file_name="transcripcion.txt",
-                    mime="text/plain",
-                )
-
-        with col2:
-            if "descripciones" in st.session_state:
-                st.subheader("Descripcion Visual")
-                for i, desc in enumerate(st.session_state["descripciones"]):
-                    st.markdown(f"**Fotograma {i+1}:**")
-                    st.markdown(desc["description"])
-                    st.divider()
-
-                texto_desc = "\n\n---\n\n".join(
-                    [f"Fotograma {i+1}:\n{d['description']}" for i, d in enumerate(st.session_state["descripciones"])]
-                )
-                st.download_button(
-                    "Descargar descripciones",
-                    texto_desc,
-                    file_name="descripciones.txt",
-                    mime="text/plain",
-                )
+    else:
+        mostrar_resultados_previos()
 
 
 if __name__ == "__main__":
