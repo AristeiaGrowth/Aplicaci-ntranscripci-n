@@ -83,7 +83,33 @@ def descargar_google_drive(url: str, output_dir: str) -> str:
         st.stop()
 
 
-def descargar_video(url: str, output_dir: str) -> str:
+def normalizar_url_wistia(url: str) -> str:
+    """Detecta media_ids o embeds de Wistia y los convierte a URL de iframe."""
+    url = url.strip()
+    # media_id pelado (10 caracteres alfanumericos)
+    if re.fullmatch(r'[a-zA-Z0-9]{10}', url):
+        return f"https://fast.wistia.net/embed/iframe/{url}"
+    # wistia_async_XXXXXXXXXX
+    m = re.search(r'wistia_async_([a-zA-Z0-9]{10})', url)
+    if m:
+        return f"https://fast.wistia.net/embed/iframe/{m.group(1)}"
+    # Ya es un iframe
+    if re.search(r'wistia\.(?:net|com)/embed/iframe/', url):
+        return url
+    # URL de medias (.json/.bin/etc)
+    m = re.search(r'wistia\.(?:net|com)/embed/medias/([a-zA-Z0-9]{10})', url)
+    if m:
+        return f"https://fast.wistia.net/embed/iframe/{m.group(1)}"
+    return url
+
+
+def descargar_video(
+    url: str,
+    output_dir: str,
+    cookies_file: str | None = None,
+    referer: str | None = None,
+    video_password: str | None = None,
+) -> str:
     """Descarga un video usando yt-dlp."""
     output_template = os.path.join(output_dir, "video.%(ext)s")
     cmd = [
@@ -91,15 +117,21 @@ def descargar_video(url: str, output_dir: str) -> str:
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", output_template,
-        url,
     ]
+    if cookies_file:
+        cmd += ["--cookies", cookies_file]
+    if referer:
+        cmd += ["--referer", referer]
+    if video_password:
+        cmd += ["--video-password", video_password]
+    cmd.append(url)
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
     except subprocess.CalledProcessError as e:
         st.error(f"Error al descargar el video:\n```\n{e.stderr}\n```")
         st.stop()
     except subprocess.TimeoutExpired:
-        st.error("La descarga tardo demasiado (>5 min). Intenta con un video mas corto.")
+        st.error("La descarga tardo demasiado (>10 min). Intenta con un video mas corto.")
         st.stop()
 
     # Buscar el archivo descargado
@@ -504,7 +536,39 @@ def main():
     tab_url, tab_drive, tab_archivo = st.tabs(["Desde URL", "Google Drive", "Subir archivo"])
 
     with tab_url:
-        url = st.text_input("URL del video (YouTube, Vimeo, Twitter, TikTok, etc.)")
+        url = st.text_input(
+            "URL del video (YouTube, Vimeo, Twitter, TikTok, Wistia, etc.)",
+            help="Tambien acepta el media_id de Wistia (10 caracteres alfanumericos).",
+        )
+        with st.expander("Opciones avanzadas (sitios con login, Wistia protegido, etc.)"):
+            cookies_upload = st.file_uploader(
+                "Cookies (archivo cookies.txt formato Netscape)",
+                type=["txt"],
+                help=(
+                    "Para descargar videos detras de login (Kajabi, Teachable, Thinkific, "
+                    "Hotmart, etc.) exporta tus cookies desde el navegador con la extension "
+                    "'Get cookies.txt LOCALLY' (Chrome/Firefox) y subelas aqui."
+                ),
+                key="cookies_url",
+            )
+            referer_url = st.text_input(
+                "Referer URL",
+                placeholder="https://www.tucurso.com/clases/leccion-1",
+                help=(
+                    "URL de la pagina donde esta embebido el video. Necesario para Wistia "
+                    "con restriccion de dominio."
+                ),
+                key="referer_url_input",
+            )
+            video_password = st.text_input(
+                "Password del video",
+                type="password",
+                help=(
+                    "Contrasena del video (no del sitio). Solo si Wistia/Vimeo le pone "
+                    "password al video especifico."
+                ),
+                key="vpass_url",
+            )
         procesar_url = st.button("Procesar URL", type="primary", use_container_width=True)
 
     with tab_drive:
@@ -552,8 +616,25 @@ def main():
             solo_audio = False
 
             if fuente == "url":
+                # Guardar cookies a archivo temporal si el usuario las subio
+                cookies_path = None
+                if cookies_upload is not None:
+                    cookies_path = os.path.join(tmpdir, "cookies.txt")
+                    with open(cookies_path, "wb") as f:
+                        f.write(cookies_upload.getbuffer())
+
+                url_normalizada = normalizar_url_wistia(url)
+                if url_normalizada != url:
+                    st.info(f"URL de Wistia detectada, usando: `{url_normalizada}`")
+
                 with st.status("Descargando video...", expanded=True) as status:
-                    video_path = descargar_video(url, tmpdir)
+                    video_path = descargar_video(
+                        url_normalizada,
+                        tmpdir,
+                        cookies_file=cookies_path,
+                        referer=referer_url or None,
+                        video_password=video_password or None,
+                    )
                     duracion = obtener_duracion_video(video_path)
                     status.update(
                         label=f"Video descargado ({duracion:.0f} segundos)",
