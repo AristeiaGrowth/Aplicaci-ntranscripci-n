@@ -379,7 +379,7 @@ def mostrar_resultados_previos():
                 st.divider()
 
 
-def procesar_contenido(video_path: str, tmpdir: str, solo_audio: bool, solo_transcripcion: bool, num_frames: int):
+def procesar_contenido(video_path: str, tmpdir: str, solo_audio: bool, solo_transcripcion: bool, saltar_contexto: bool, num_frames: int):
     """Procesa el video/audio: transcribe, describe fotogramas, y analiza contexto."""
     transcripcion = None
     descripciones = None
@@ -428,20 +428,101 @@ def procesar_contenido(video_path: str, tmpdir: str, solo_audio: bool, solo_tran
                 mime="text/plain",
             )
 
-    # Analisis de contexto con IA
-    st.divider()
-    st.subheader("Analisis de Contexto")
-    with st.spinner("Analizando contexto del contenido con IA..."):
-        contexto = analizar_contexto(transcripcion, descripciones)
+    # Analisis de contexto con IA (opcional)
+    if not saltar_contexto:
+        st.divider()
+        st.subheader("Analisis de Contexto")
+        with st.spinner("Analizando contexto del contenido con IA..."):
+            contexto = analizar_contexto(transcripcion, descripciones)
 
-    st.session_state["contexto"] = contexto
-    st.markdown(contexto)
-    st.download_button(
-        "Descargar analisis",
-        contexto,
-        file_name="analisis_contexto.txt",
-        mime="text/plain",
-    )
+        st.session_state["contexto"] = contexto
+        st.markdown(contexto)
+        st.download_button(
+            "Descargar analisis",
+            contexto,
+            file_name="analisis_contexto.txt",
+            mime="text/plain",
+        )
+
+
+def procesar_multiples_audios(archivos, solo_transcripcion: bool, saltar_contexto: bool, num_frames: int):
+    """Transcribe multiples archivos de audio/video de una sola vez."""
+    resultados = []
+
+    st.subheader(f"Procesando {len(archivos)} archivos...")
+    progress = st.progress(0)
+
+    for idx, archivo in enumerate(archivos):
+        st.markdown(f"### Archivo {idx + 1}: `{archivo.name}`")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                with st.spinner(f"Guardando {archivo.name}..."):
+                    file_path = guardar_archivo_subido(archivo, tmpdir)
+                    solo_audio = es_archivo_audio(file_path)
+
+                with st.spinner(f"Extrayendo audio de {archivo.name}..."):
+                    audio_path = extraer_audio(file_path, tmpdir)
+
+                with st.spinner(f"Transcribiendo {archivo.name}..."):
+                    client = OpenAI()
+                    segments = dividir_audio(audio_path, tmpdir)
+                    partes = []
+                    for seg_path in segments:
+                        with open(seg_path, "rb") as audio_file:
+                            response = client.audio.transcriptions.create(
+                                model="whisper-1",
+                                file=audio_file,
+                            )
+                            partes.append(response.text)
+                    transcripcion = " ".join(partes)
+
+                resultados.append({
+                    "archivo": archivo.name,
+                    "transcripcion": transcripcion,
+                })
+
+                st.text_area(
+                    f"Transcripcion de {archivo.name}",
+                    transcripcion,
+                    height=200,
+                    key=f"trans_{idx}",
+                )
+                st.download_button(
+                    f"Descargar transcripcion de {archivo.name}",
+                    transcripcion,
+                    file_name=f"{Path(archivo.name).stem}_transcripcion.txt",
+                    mime="text/plain",
+                    key=f"dl_{idx}",
+                )
+                st.divider()
+            except Exception as e:
+                st.error(f"Error procesando {archivo.name}: {e}")
+                resultados.append({
+                    "archivo": archivo.name,
+                    "transcripcion": f"ERROR: {e}",
+                })
+
+        progress.progress((idx + 1) / len(archivos))
+
+    progress.empty()
+
+    # Descargar todas las transcripciones juntas
+    if resultados:
+        st.success(f"Completados {len(resultados)} archivos")
+        todas = "\n\n" + ("=" * 60) + "\n\n"
+        todas = todas.join([
+            f"ARCHIVO: {r['archivo']}\n\n{r['transcripcion']}" for r in resultados
+        ])
+        st.download_button(
+            "Descargar TODAS las transcripciones",
+            todas,
+            file_name="transcripciones_completas.txt",
+            mime="text/plain",
+            type="primary",
+        )
+
+        st.session_state["transcripciones_multiples"] = resultados
 
 
 def main():
@@ -485,8 +566,12 @@ def main():
         st.divider()
         st.header("Opciones")
         solo_transcripcion = st.checkbox(
-            "Solo transcripcion",
-            help="Solo transcribir el audio, sin analizar fotogramas (mas rapido y barato)",
+            "Saltar analisis visual",
+            help="No analizar fotogramas del video (mas rapido y barato)",
+        )
+        saltar_contexto = st.checkbox(
+            "Saltar analisis de contexto",
+            help="No generar el analisis de contexto con IA (solo transcribir)",
         )
         num_frames = st.slider("Numero de fotogramas a analizar", 1, 10, 5,
                                 disabled=solo_transcripcion)
@@ -500,8 +585,13 @@ def main():
             "- FFmpeg (procesamiento)"
         )
 
-    # Input principal - Tabs para URL, Google Drive, o archivo local
-    tab_url, tab_drive, tab_archivo = st.tabs(["Desde URL", "Google Drive", "Subir archivo"])
+    # Input principal - Tabs
+    tab_url, tab_drive, tab_archivo, tab_multiple = st.tabs([
+        "Desde URL",
+        "Google Drive",
+        "Subir archivo",
+        "Multiples audios",
+    ])
 
     with tab_url:
         url = st.text_input("URL del video (YouTube, Vimeo, Twitter, TikTok, etc.)")
@@ -523,6 +613,18 @@ def main():
         )
         procesar_archivo = st.button("Procesar archivo", type="primary", use_container_width=True)
 
+    with tab_multiple:
+        st.markdown("**Transcribe varios archivos de una sola vez** (ideal para audios de clientes)")
+        archivos_multiples = st.file_uploader(
+            "Sube multiples archivos de audio o video",
+            type=["mp3", "wav", "m4a", "ogg", "flac", "mp4", "mkv", "webm", "mov", "avi"],
+            accept_multiple_files=True,
+            help="Puedes seleccionar varios archivos a la vez. Solo se transcribira el audio.",
+        )
+        procesar_multiples = st.button(
+            "Transcribir todos", type="primary", use_container_width=True
+        )
+
     # Determinar si hay algo que procesar
     debe_procesar = False
     fuente = None
@@ -542,10 +644,24 @@ def main():
         fuente = "archivo"
     elif procesar_archivo and not archivo:
         st.warning("Por favor sube un archivo.")
+    elif procesar_multiples and archivos_multiples:
+        debe_procesar = True
+        fuente = "multiples"
+    elif procesar_multiples and not archivos_multiples:
+        st.warning("Por favor sube al menos un archivo.")
 
     if debe_procesar:
-        if not os.getenv("OPENAI_API_KEY") or not os.getenv("ANTHROPIC_API_KEY"):
-            st.error("Por favor configura ambas API keys en la barra lateral.")
+        if not os.getenv("OPENAI_API_KEY"):
+            st.error("Por favor configura tu OpenAI API key en la barra lateral.")
+            return
+        # Anthropic solo se necesita si NO es modo multiples y no se saltan contexto+visual
+        necesita_anthropic = fuente != "multiples" and (not solo_transcripcion or not saltar_contexto)
+        if necesita_anthropic and not os.getenv("ANTHROPIC_API_KEY"):
+            st.error("Por favor configura tu Anthropic API key en la barra lateral.")
+            return
+
+        if fuente == "multiples":
+            procesar_multiples_audios(archivos_multiples, solo_transcripcion, saltar_contexto, num_frames)
             return
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -577,7 +693,7 @@ def main():
                     tipo = "Audio" if solo_audio else "Video"
                     st.success(f"{tipo} cargado ({duracion:.0f} segundos)")
 
-            procesar_contenido(video_path, tmpdir, solo_audio, solo_transcripcion, num_frames)
+            procesar_contenido(video_path, tmpdir, solo_audio, solo_transcripcion, saltar_contexto, num_frames)
 
     else:
         mostrar_resultados_previos()
