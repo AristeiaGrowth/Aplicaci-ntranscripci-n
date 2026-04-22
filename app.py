@@ -65,7 +65,7 @@ def descargar_google_drive(url: str, output_dir: str) -> str:
     output_path = os.path.join(output_dir, "drive_file")
     try:
         download_url = f"https://drive.google.com/uc?id={file_id}"
-        result = gdown.download(download_url, output_path, quiet=False, fuzzy=True)
+        result = gdown.download(download_url, output_path, quiet=False)
         if result is None:
             st.error(
                 "No se pudo descargar el archivo. Verifica que:\n"
