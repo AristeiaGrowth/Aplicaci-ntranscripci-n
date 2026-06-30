@@ -251,7 +251,7 @@ def describir_fotograma(client: Anthropic, image_path: str, frame_num: int, tota
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=500,
             messages=[
                 {
@@ -316,7 +316,7 @@ def analizar_contexto(transcripcion: str, descripciones: list[dict] | None = Non
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=1500,
             messages=[
                 {
