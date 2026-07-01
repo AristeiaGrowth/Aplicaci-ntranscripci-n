@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 
 import gdown
+from PIL import Image
+from io import BytesIO
 from openai import OpenAI
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -244,10 +246,26 @@ def extraer_fotogramas(video_path: str, output_dir: str, num_frames: int = 5) ->
     return frame_paths
 
 
+def preparar_imagen_para_api(image_path: str, max_size: int = 1568, quality: int = 80) -> str:
+    """Redimensiona y comprime una imagen para reducir su tamano antes de enviarla a la API."""
+    img = Image.open(image_path)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # Redimensionar si es muy grande (mantiene aspect ratio)
+    if max(img.size) > max_size:
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+    # Comprimir a JPEG en memoria
+    buffer = BytesIO()
+    img.save(buffer, format="JPEG", quality=quality, optimize=True)
+    buffer.seek(0)
+    return base64.standard_b64encode(buffer.read()).decode("utf-8")
+
+
 def describir_fotograma(client: Anthropic, image_path: str, frame_num: int, total: int, max_retries: int = 3) -> str:
     """Describe un fotograma usando Claude Vision con reintentos automaticos."""
-    with open(image_path, "rb") as f:
-        image_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
+    image_b64 = preparar_imagen_para_api(image_path)
 
     ultimo_error = None
     for intento in range(max_retries):
