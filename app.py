@@ -244,53 +244,61 @@ def extraer_fotogramas(video_path: str, output_dir: str, num_frames: int = 5) ->
     return frame_paths
 
 
-def describir_fotograma(client: Anthropic, image_path: str, frame_num: int, total: int) -> str:
-    """Describe un fotograma usando Claude Vision."""
+def describir_fotograma(client: Anthropic, image_path: str, frame_num: int, total: int, max_retries: int = 3) -> str:
+    """Describe un fotograma usando Claude Vision con reintentos automaticos."""
     with open(image_path, "rb") as f:
         image_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
 
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=500,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_b64,
+    ultimo_error = None
+    for intento in range(max_retries):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=500,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": image_b64,
+                                },
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Este es el fotograma {frame_num} de {total} de un video. "
-                                "Haz dos cosas:\n\n"
-                                "1. **TEXTO EN PANTALLA**: Lee y transcribe TODO el texto visible en la imagen: "
-                                "titulos, subtitulos, text overlays, captions, watermarks, logos con texto, "
-                                "textos animados, hashtags, nombres de usuario, cualquier texto superpuesto. "
-                                "Transcribelo exactamente como aparece.\n\n"
-                                "2. **DESCRIPCION VISUAL**: Describe detalladamente la escena: "
-                                "personas, objetos, colores, ambiente, acciones y composicion.\n\n"
-                                "Responde en espanol."
-                            ),
-                        },
-                    ],
-                }
-            ],
-        )
-        return response.content[0].text
-    except Exception as e:
-        return f"Error al describir fotograma: {e}"
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"Este es el fotograma {frame_num} de {total} de un video. "
+                                    "Haz dos cosas:\n\n"
+                                    "1. **TEXTO EN PANTALLA**: Lee y transcribe TODO el texto visible en la imagen: "
+                                    "titulos, subtitulos, text overlays, captions, watermarks, logos con texto, "
+                                    "textos animados, hashtags, nombres de usuario, cualquier texto superpuesto. "
+                                    "Transcribelo exactamente como aparece.\n\n"
+                                    "2. **DESCRIPCION VISUAL**: Describe detalladamente la escena: "
+                                    "personas, objetos, colores, ambiente, acciones y composicion.\n\n"
+                                    "Responde en espanol."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            return response.content[0].text
+        except Exception as e:
+            ultimo_error = e
+            if intento < max_retries - 1:
+                # Backoff exponencial: 2s, 4s, 8s
+                time.sleep(2 ** (intento + 1))
+
+    return f"Error al describir fotograma tras {max_retries} intentos: {ultimo_error}"
 
 
 def describir_todos_fotogramas(frame_paths: list[str]) -> list[dict]:
     """Describe todos los fotogramas extraidos."""
-    client = Anthropic()
+    # Cliente con timeout mas largo (60s) para evitar connection errors
+    client = Anthropic(timeout=60.0, max_retries=2)
     resultados = []
     progress = st.progress(0)
     total = len(frame_paths)
@@ -299,14 +307,17 @@ def describir_todos_fotogramas(frame_paths: list[str]) -> list[dict]:
         descripcion = describir_fotograma(client, path, i + 1, total)
         resultados.append({"path": path, "description": descripcion})
         progress.progress((i + 1) / total)
+        # Pequena pausa entre llamadas para evitar rate limits
+        if i < total - 1:
+            time.sleep(0.3)
 
     progress.empty()
     return resultados
 
 
-def analizar_contexto(transcripcion: str, descripciones: list[dict] | None = None) -> str:
-    """Usa Claude para analizar el contexto completo del video/audio."""
-    client = Anthropic()
+def analizar_contexto(transcripcion: str, descripciones: list[dict] | None = None, max_retries: int = 3) -> str:
+    """Usa Claude para analizar el contexto completo del video/audio con reintentos."""
+    client = Anthropic(timeout=60.0, max_retries=2)
 
     contenido = f"## Transcripcion del audio:\n{transcripcion}\n\n"
     if descripciones:
@@ -314,33 +325,39 @@ def analizar_contexto(transcripcion: str, descripciones: list[dict] | None = Non
         for i, d in enumerate(descripciones):
             contenido += f"\n### Fotograma {i+1}:\n{d['description']}\n"
 
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=1500,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Analiza el siguiente contenido de un video/audio y proporciona un analisis completo.\n\n"
-                        f"{contenido}\n\n"
-                        "Responde con las siguientes secciones:\n\n"
-                        "1. **RESUMEN**: Un resumen conciso de que trata el video/audio (2-3 oraciones).\n\n"
-                        "2. **CONTEXTO**: Que tipo de contenido es (anuncio publicitario, tutorial, podcast, "
-                        "entrevista, presentacion, contenido educativo, entretenimiento, etc.) y para que audiencia.\n\n"
-                        "3. **MENSAJE CLAVE**: Cual es el mensaje principal o proposito del contenido. "
-                        "Si es un anuncio, que producto/servicio promueve y que estrategia usa.\n\n"
-                        "4. **TONO Y ESTILO**: Describe el tono (formal, casual, emocional, humoristico, urgente, etc.) "
-                        "y el estilo de comunicacion.\n\n"
-                        "5. **PUNTOS IMPORTANTES**: Lista los puntos mas relevantes mencionados.\n\n"
-                        "Responde en espanol."
-                    ),
-                }
-            ],
-        )
-        return response.content[0].text
-    except Exception as e:
-        return f"Error al analizar contexto: {e}"
+    ultimo_error = None
+    for intento in range(max_retries):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=1500,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "Analiza el siguiente contenido de un video/audio y proporciona un analisis completo.\n\n"
+                            f"{contenido}\n\n"
+                            "Responde con las siguientes secciones:\n\n"
+                            "1. **RESUMEN**: Un resumen conciso de que trata el video/audio (2-3 oraciones).\n\n"
+                            "2. **CONTEXTO**: Que tipo de contenido es (anuncio publicitario, tutorial, podcast, "
+                            "entrevista, presentacion, contenido educativo, entretenimiento, etc.) y para que audiencia.\n\n"
+                            "3. **MENSAJE CLAVE**: Cual es el mensaje principal o proposito del contenido. "
+                            "Si es un anuncio, que producto/servicio promueve y que estrategia usa.\n\n"
+                            "4. **TONO Y ESTILO**: Describe el tono (formal, casual, emocional, humoristico, urgente, etc.) "
+                            "y el estilo de comunicacion.\n\n"
+                            "5. **PUNTOS IMPORTANTES**: Lista los puntos mas relevantes mencionados.\n\n"
+                            "Responde en espanol."
+                        ),
+                    }
+                ],
+            )
+            return response.content[0].text
+        except Exception as e:
+            ultimo_error = e
+            if intento < max_retries - 1:
+                time.sleep(2 ** (intento + 1))
+
+    return f"Error al analizar contexto tras {max_retries} intentos: {ultimo_error}"
 
 
 # --- Interfaz principal ---
