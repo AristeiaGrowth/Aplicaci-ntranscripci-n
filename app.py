@@ -86,21 +86,56 @@ def descargar_google_drive(url: str, output_dir: str) -> str:
 def normalizar_url_wistia(url: str) -> str:
     """Detecta media_ids o embeds de Wistia y los convierte a URL de iframe."""
     url = url.strip()
-    # media_id pelado (10 caracteres alfanumericos)
     if re.fullmatch(r'[a-zA-Z0-9]{10}', url):
         return f"https://fast.wistia.net/embed/iframe/{url}"
-    # wistia_async_XXXXXXXXXX
     m = re.search(r'wistia_async_([a-zA-Z0-9]{10})', url)
     if m:
         return f"https://fast.wistia.net/embed/iframe/{m.group(1)}"
-    # Ya es un iframe
     if re.search(r'wistia\.(?:net|com)/embed/iframe/', url):
         return url
-    # URL de medias (.json/.bin/etc)
     m = re.search(r'wistia\.(?:net|com)/embed/medias/([a-zA-Z0-9]{10})', url)
     if m:
         return f"https://fast.wistia.net/embed/iframe/{m.group(1)}"
     return url
+
+
+def es_url_youtube(url: str) -> bool:
+    return bool(re.search(r'(?:youtube\.com|youtu\.be)', url))
+
+
+def extraer_youtube_id(url: str) -> str | None:
+    """Extrae el video ID de una URL de YouTube."""
+    patterns = [
+        r'(?:v=)([a-zA-Z0-9_-]{11})',
+        r'(?:youtu\.be/)([a-zA-Z0-9_-]{11})',
+        r'(?:embed/)([a-zA-Z0-9_-]{11})',
+        r'(?:shorts/)([a-zA-Z0-9_-]{11})',
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def obtener_transcripcion_youtube(video_id: str) -> str | None:
+    """Obtiene subtitulos directamente de YouTube sin descargar el video."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return None
+
+    ytt = YouTubeTranscriptApi()
+    for langs in [['es', 'es-419', 'es-ES'], ['en', 'en-US', 'en-GB'], None]:
+        try:
+            if langs:
+                transcript = ytt.fetch(video_id, languages=langs)
+            else:
+                transcript = ytt.fetch(video_id)
+            return ' '.join([entry.text for entry in transcript])
+        except Exception:
+            continue
+    return None
 
 
 def descargar_video(
@@ -128,19 +163,29 @@ def descargar_video(
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
     except subprocess.CalledProcessError as e:
-        st.error(f"Error al descargar el video:\n```\n{e.stderr}\n```")
-        st.stop()
+        stderr = e.stderr or ""
+        if "Sign in to confirm" in stderr or "HTTP Error 429" in stderr:
+            st.error(
+                "YouTube bloqueo la descarga desde este servidor.\n\n"
+                "**Opciones:**\n"
+                "1. Activa **'Solo transcripcion'** en la barra lateral para obtener "
+                "subtitulos directamente de YouTube (sin descargar el video)\n"
+                "2. Sube tus **cookies de YouTube** en 'Opciones avanzadas'\n"
+                "3. Descarga el video en tu PC con `yt-dlp` y subelo en 'Subir archivo'"
+            )
+        else:
+            st.error(f"Error al descargar el video:\n```\n{stderr}\n```")
+        return None
     except subprocess.TimeoutExpired:
         st.error("La descarga tardo demasiado (>10 min). Intenta con un video mas corto.")
-        st.stop()
+        return None
 
-    # Buscar el archivo descargado
     for f in Path(output_dir).iterdir():
         if f.name.startswith("video") and f.suffix in (".mp4", ".mkv", ".webm"):
             return str(f)
 
     st.error("No se encontro el archivo de video descargado.")
-    st.stop()
+    return None
 
 
 def guardar_archivo_subido(archivo, output_dir: str) -> str:
@@ -411,17 +456,26 @@ def mostrar_resultados_previos():
                 st.divider()
 
 
-def procesar_contenido(video_path: str, tmpdir: str, solo_audio: bool, solo_transcripcion: bool, num_frames: int):
+def procesar_contenido(
+    video_path: str | None,
+    tmpdir: str,
+    solo_audio: bool,
+    solo_transcripcion: bool,
+    num_frames: int,
+    transcripcion_previa: str | None = None,
+):
     """Procesa el video/audio: transcribe, describe fotogramas, y analiza contexto."""
-    transcripcion = None
+    transcripcion = transcripcion_previa
     descripciones = None
 
-    # Siempre transcribir
     st.subheader("Transcripcion")
-    with st.spinner("Extrayendo audio..."):
-        audio_path = extraer_audio(video_path, tmpdir)
-    with st.spinner("Transcribiendo con Whisper..."):
-        transcripcion = transcribir_audio(audio_path, tmpdir)
+    if transcripcion is None:
+        with st.spinner("Extrayendo audio..."):
+            audio_path = extraer_audio(video_path, tmpdir)
+        with st.spinner("Transcribiendo con Whisper..."):
+            transcripcion = transcribir_audio(audio_path, tmpdir)
+    else:
+        st.info("Transcripcion obtenida directamente de YouTube")
 
     st.session_state["transcripcion"] = transcripcion
     st.text_area("Texto transcrito", transcripcion, height=300)
@@ -616,7 +670,6 @@ def main():
             solo_audio = False
 
             if fuente == "url":
-                # Guardar cookies a archivo temporal si el usuario las subio
                 cookies_path = None
                 if cookies_upload is not None:
                     cookies_path = os.path.join(tmpdir, "cookies.txt")
@@ -627,19 +680,48 @@ def main():
                 if url_normalizada != url:
                     st.info(f"URL de Wistia detectada, usando: `{url_normalizada}`")
 
-                with st.status("Descargando video...", expanded=True) as status:
-                    video_path = descargar_video(
-                        url_normalizada,
-                        tmpdir,
-                        cookies_file=cookies_path,
-                        referer=referer_url or None,
-                        video_password=video_password or None,
+                # YouTube: intentar obtener subtitulos directamente
+                yt_id = extraer_youtube_id(url)
+                yt_transcript = None
+                if yt_id:
+                    with st.spinner("Buscando subtitulos en YouTube..."):
+                        yt_transcript = obtener_transcripcion_youtube(yt_id)
+
+                if yt_id and yt_transcript and solo_transcripcion:
+                    st.success("Subtitulos obtenidos directamente de YouTube")
+                    procesar_contenido(
+                        None, tmpdir, False, True, num_frames,
+                        transcripcion_previa=yt_transcript,
                     )
-                    duracion = obtener_duracion_video(video_path)
-                    status.update(
-                        label=f"Video descargado ({duracion:.0f} segundos)",
-                        state="complete",
-                    )
+                    return
+                else:
+                    with st.status("Descargando video...", expanded=True) as status:
+                        video_path = descargar_video(
+                            url_normalizada,
+                            tmpdir,
+                            cookies_file=cookies_path,
+                            referer=referer_url or None,
+                            video_password=video_password or None,
+                        )
+                    if video_path is None:
+                        if yt_transcript:
+                            st.warning(
+                                "No se pudo descargar el video de YouTube, "
+                                "pero se obtuvieron los subtitulos."
+                            )
+                            procesar_contenido(
+                                None, tmpdir, False, True, num_frames,
+                                transcripcion_previa=yt_transcript,
+                            )
+                            return
+                        else:
+                            st.stop()
+                    else:
+                        duracion = obtener_duracion_video(video_path)
+                        status.update(
+                            label=f"Video descargado ({duracion:.0f} segundos)",
+                            state="complete",
+                        )
             elif fuente == "drive":
                 with st.status("Descargando desde Google Drive...", expanded=True) as status:
                     video_path = descargar_google_drive(drive_url, tmpdir)
