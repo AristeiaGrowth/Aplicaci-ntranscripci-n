@@ -98,7 +98,34 @@ def descargar_video(url: str, output_dir: str) -> str:
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
     except subprocess.CalledProcessError as e:
-        st.error(f"Error al descargar el video:\n```\n{e.stderr}\n```")
+        stderr = e.stderr or ""
+        # Detectar errores comunes de autenticacion
+        auth_keywords = [
+            "registered users", "cookies", "login required", "private",
+            "sign in", "authentication", "not authorized", "login-required",
+        ]
+        es_error_auth = any(kw.lower() in stderr.lower() for kw in auth_keywords)
+
+        if es_error_auth:
+            plataforma = "esta plataforma"
+            if "facebook" in url.lower() or "fb.com" in url.lower():
+                plataforma = "Facebook"
+            elif "instagram" in url.lower():
+                plataforma = "Instagram"
+            elif "linkedin" in url.lower():
+                plataforma = "LinkedIn"
+
+            st.error(
+                f"**{plataforma} requiere autenticacion** para descargar este video.\n\n"
+                "**Soluciones alternativas:**\n\n"
+                "1. **Descarga el video manualmente** (con una extension del navegador como "
+                "'Video Downloader Plus' o similar) y subelo desde la tab **'Subir archivo'**.\n\n"
+                "2. **Sube el video a Google Drive** (con permisos de 'Cualquier persona con el link') "
+                "y pega el link en la tab **'Google Drive'** - mucho mas rapido que subirlo desde tu PC.\n\n"
+                "3. Si el video es publico, verifica que la URL sea la version publica del video."
+            )
+        else:
+            st.error(f"Error al descargar el video:\n```\n{stderr}\n```")
         st.stop()
     except subprocess.TimeoutExpired:
         st.error("La descarga tardo demasiado (>5 min). Intenta con un video mas corto.")
@@ -630,6 +657,10 @@ def main():
 
     with tab_url:
         url = st.text_input("URL del video (YouTube, Vimeo, Twitter, TikTok, etc.)")
+        st.caption(
+            "Nota: **Facebook, Instagram y LinkedIn** requieren autenticacion. "
+            "Para esos, descarga el video y usa las tabs de **Google Drive** o **Subir archivo**."
+        )
         procesar_url = st.button("Procesar URL", type="primary", use_container_width=True)
 
     with tab_drive:
